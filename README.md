@@ -17,16 +17,19 @@ A CLI personal-assistant agent, built stage by stage to learn AI agents, tool us
    # then edit .env and paste your key from https://console.anthropic.com/settings/keys
    ```
 
-## Run (Stage 0)
+## Run (Stage 1)
 
 ```bash
-npm run dev -- "What is an AI agent, in one sentence?"
+npm run dev
 ```
+
+Type a message and press Enter; the reply streams back token-by-token. The agent
+remembers the conversation. Type `exit` or `quit` (or Ctrl+C) to leave.
 
 ## Roadmap
 
 - [x] **Stage 0 — Hello Claude:** one-shot CLI, a single Messages API call.
-- [ ] **Stage 1 — Chat loop:** multi-turn conversation with history + streaming.
+- [x] **Stage 1 — Chat loop:** multi-turn conversation with history + streaming.
 - [ ] **Stage 2 — First tools:** `read_file`, `write_file`, `calculator`.
 - [ ] **Stage 3 — The agentic loop:** chain tool calls automatically (SDK tool runner).
 - [ ] **Stage 4 — Structured output & polish:** typed JSON, error handling.
