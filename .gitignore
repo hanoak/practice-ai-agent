@@ -3,3 +3,6 @@ dist/
 .env
 *.log
 .DS_Store
+
+# Runtime data written by the notes MCP server (not project code)
+notes.json

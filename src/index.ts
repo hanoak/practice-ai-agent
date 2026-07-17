@@ -58,26 +58,10 @@ const calculator = betaZodTool({
 });
 
 // ---------------------------------------------------------------------------
-// MCP: launch the filesystem server and adopt its tools
+// MCP: launch servers and adopt their tools
 // ---------------------------------------------------------------------------
 
-// A transport is HOW we talk to the server. Stdio spawns the server as a child
-// process and speaks MCP over its stdin/stdout. The positional arg is the only
-// directory the server is allowed to touch — the SERVER enforces this sandbox,
-// not us. That's a benefit of the split: the tool provider owns its safety.
-const transport = new StdioClientTransport({
-  command: "npx",
-  args: ["-y", "@modelcontextprotocol/server-filesystem", process.cwd()],
-});
-
-const mcp = new Client({ name: "practice-ai-agent", version: "0.1.0" });
-await mcp.connect(transport);
-
-// Ask the server what it can do. Each definition has a name, description, and a
-// JSON Schema for its input — everything we need to expose it to Claude.
-const { tools: mcpToolDefs } = await mcp.listTools();
-
-function mcpResultToText(result: Awaited<ReturnType<typeof mcp.callTool>>): string {
+function mcpResultToText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   const content = result.content;
   if (!Array.isArray(content)) return "";
   return content
@@ -85,33 +69,60 @@ function mcpResultToText(result: Awaited<ReturnType<typeof mcp.callTool>>): stri
     .join("\n");
 }
 
-// Wrap each MCP tool as a runnable tool for our tool runner. betaTool takes a
-// JSON Schema (which is exactly what MCP gives us). The run function forwards
-// the call to the MCP server — the implementation lives THERE, not here.
-const mcpTools = mcpToolDefs.map((def) =>
-  betaTool({
-    name: def.name,
-    description: def.description ?? "",
-    // MCP input schemas are dynamic; betaTool wants a typed const schema, so we
-    // cast. Args are validated against this schema by the runner before run().
-    inputSchema: def.inputSchema as Parameters<typeof betaTool>[0]["inputSchema"],
-    run: async (args) => {
-      stdout.write(`\n  ↳ ${def.name}(${JSON.stringify(args)})`);
-      const result = await mcp.callTool({
-        name: def.name,
-        arguments: args as Record<string, unknown>,
-      });
-      return mcpResultToText(result);
-    },
-  }),
-);
+// Connect to one MCP server and return its tools, wrapped for our tool runner.
+// A transport is HOW we talk to the server: stdio spawns it as a child process
+// and speaks MCP over its stdin/stdout. Whatever the server exposes, we discover
+// via listTools() and forward each call back to it via callTool() — the tool
+// IMPLEMENTATIONS live in the server, not here. This one helper now works for
+// BOTH the third-party filesystem server and our own notes server.
+async function adoptMcpServer(command: string, args: string[]) {
+  const transport = new StdioClientTransport({ command, args });
+  const mcp = new Client({ name: "practice-ai-agent", version: "0.1.0" });
+  await mcp.connect(transport);
 
-const tools = [calculator, ...mcpTools];
+  const { tools: defs } = await mcp.listTools();
+  const tools = defs.map((def) =>
+    betaTool({
+      name: def.name,
+      description: def.description ?? "",
+      // MCP input schemas are dynamic; betaTool wants a typed const schema, so
+      // we cast. The runner still validates args against it before run().
+      inputSchema: def.inputSchema as Parameters<typeof betaTool>[0]["inputSchema"],
+      run: async (args) => {
+        stdout.write(`\n  ↳ ${def.name}(${JSON.stringify(args)})`);
+        const result = await mcp.callTool({
+          name: def.name,
+          arguments: args as Record<string, unknown>,
+        });
+        return mcpResultToText(result);
+      },
+    }),
+  );
+
+  return { mcp, tools };
+}
+
+// Server 1: the third-party filesystem server (sandboxed to this directory).
+const filesystem = await adoptMcpServer("npx", [
+  "-y",
+  "@modelcontextprotocol/server-filesystem",
+  process.cwd(),
+]);
+
+// Server 2: OUR OWN notes server, run with tsx. Same protocol, same wiring —
+// the client can't tell it's homegrown.
+const notes = await adoptMcpServer("npx", ["tsx", "src/server.ts"]);
+
+// Clients to shut down on exit.
+const mcpClients = [filesystem.mcp, notes.mcp];
+
+// One local tool + tools from both servers, all treated identically.
+const tools = [calculator, ...filesystem.tools, ...notes.tools];
 
 console.log(
-  `Connected to filesystem MCP server. Tools available: ` +
-    [calculator.name, ...mcpToolDefs.map((t) => t.name)].join(", ") +
-    ".\n",
+  "Connected to 2 MCP servers (filesystem + notes). Tools available:\n  " +
+    tools.map((t) => t.name).join(", ") +
+    "\n",
 );
 
 // ---------------------------------------------------------------------------
@@ -267,5 +278,5 @@ while (true) {
 }
 
 rl.close();
-await mcp.close(); // shut down the MCP server subprocess cleanly
+for (const mcp of mcpClients) await mcp.close(); // shut down both MCP subprocesses
 console.log("Bye!");
