@@ -1,6 +1,6 @@
 {
   "name": "practice-ai-agent",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "A CLI personal-assistant agent, built stage by stage to learn tools and MCP",
   "type": "module",
   "scripts": {
