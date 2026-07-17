@@ -1,16 +1,19 @@
 import "dotenv/config";
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { readFile, writeFile } from "node:fs/promises";
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool, betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
+import { betaTool } from "@anthropic-ai/sdk/helpers/beta/json-schema";
 import { z } from "zod";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-// Stage 4 — Structured output & polish
-// Free-form chat is great for humans, but sometimes YOUR CODE needs data it can
-// rely on: fields with known names and types. This stage adds a /summary command
-// that returns a typed, schema-validated object (not prose), plus a few polish
-// commands (/help, /reset).
+// Stage 5 — Connect to an existing MCP server
+// Until now WE wrote every tool. MCP (Model Context Protocol) lets tools live in
+// a separate server process that any MCP-aware app can use. Here we launch the
+// official filesystem server as a subprocess, ask it what tools it offers, and
+// wrap each so our tool runner (and thus Claude) can call it. The file tools we
+// hand-wrote in Stage 2 are gone — the MCP server provides better ones for free.
 //   npm run dev
 
 const client = new Anthropic({
@@ -18,22 +21,101 @@ const client = new Anthropic({
 });
 
 const SYSTEM_PROMPT =
-  "You are a concise, friendly CLI assistant with access to tools for reading " +
-  "files, writing files, and doing math. Use a tool whenever it helps; do not " +
-  "guess at file contents or arithmetic you could compute.";
+  "You are a concise, friendly CLI assistant. You can do math and work with " +
+  "files (read, write, list, search) via your tools. Use a tool whenever it " +
+  "helps; do not guess at file contents or arithmetic you could compute.";
 
 const MODEL = process.env.MODEL ?? "claude-sonnet-5";
 const MAX_STEPS = 10;
 
-// Report tool errors as text (Claude can read and recover) instead of throwing.
 function fail(err: unknown): string {
   return `Error: ${err instanceof Error ? err.message : String(err)}`;
 }
 
 // ---------------------------------------------------------------------------
-// Structured output — the shape we want back from /summary. This Zod schema is
-// BOTH the runtime validator AND the TypeScript type: parse() returns an object
-// guaranteed to match it, and `summary.sentiment` is typed as the enum.
+// One LOCAL tool (calculator), to show local and MCP tools side by side. The
+// file tools now come from the MCP server below.
+// ---------------------------------------------------------------------------
+const calculator = betaZodTool({
+  name: "calculator",
+  description:
+    "Evaluate a basic arithmetic expression. Use this for any math instead of " +
+    "computing it yourself.",
+  inputSchema: z.object({
+    expression: z.string().describe("Arithmetic only, e.g. (2 + 3) * 7"),
+  }),
+  run: ({ expression }) => {
+    stdout.write(`\n  ↳ calculator(${JSON.stringify({ expression })})`);
+    if (!/^[0-9+\-*/().\s]+$/.test(expression)) {
+      return "Error: only numbers and + - * / ( ) . are allowed.";
+    }
+    try {
+      return String(Function(`"use strict"; return (${expression});`)());
+    } catch (err) {
+      return fail(err);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// MCP: launch the filesystem server and adopt its tools
+// ---------------------------------------------------------------------------
+
+// A transport is HOW we talk to the server. Stdio spawns the server as a child
+// process and speaks MCP over its stdin/stdout. The positional arg is the only
+// directory the server is allowed to touch — the SERVER enforces this sandbox,
+// not us. That's a benefit of the split: the tool provider owns its safety.
+const transport = new StdioClientTransport({
+  command: "npx",
+  args: ["-y", "@modelcontextprotocol/server-filesystem", process.cwd()],
+});
+
+const mcp = new Client({ name: "practice-ai-agent", version: "0.1.0" });
+await mcp.connect(transport);
+
+// Ask the server what it can do. Each definition has a name, description, and a
+// JSON Schema for its input — everything we need to expose it to Claude.
+const { tools: mcpToolDefs } = await mcp.listTools();
+
+function mcpResultToText(result: Awaited<ReturnType<typeof mcp.callTool>>): string {
+  const content = result.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => (block.type === "text" ? block.text : `[${block.type}]`))
+    .join("\n");
+}
+
+// Wrap each MCP tool as a runnable tool for our tool runner. betaTool takes a
+// JSON Schema (which is exactly what MCP gives us). The run function forwards
+// the call to the MCP server — the implementation lives THERE, not here.
+const mcpTools = mcpToolDefs.map((def) =>
+  betaTool({
+    name: def.name,
+    description: def.description ?? "",
+    // MCP input schemas are dynamic; betaTool wants a typed const schema, so we
+    // cast. Args are validated against this schema by the runner before run().
+    inputSchema: def.inputSchema as Parameters<typeof betaTool>[0]["inputSchema"],
+    run: async (args) => {
+      stdout.write(`\n  ↳ ${def.name}(${JSON.stringify(args)})`);
+      const result = await mcp.callTool({
+        name: def.name,
+        arguments: args as Record<string, unknown>,
+      });
+      return mcpResultToText(result);
+    },
+  }),
+);
+
+const tools = [calculator, ...mcpTools];
+
+console.log(
+  `Connected to filesystem MCP server. Tools available: ` +
+    [calculator.name, ...mcpToolDefs.map((t) => t.name)].join(", ") +
+    ".\n",
+);
+
+// ---------------------------------------------------------------------------
+// Structured output (/summary) — unchanged from Stage 4
 // ---------------------------------------------------------------------------
 const SummarySchema = z.object({
   title: z.string().describe("A short title for the conversation"),
@@ -46,74 +128,8 @@ const SummarySchema = z.object({
     .describe("Overall tone of the conversation"),
 });
 
-// ---------------------------------------------------------------------------
-// Tools (unchanged from Stage 3) — defined once each with betaZodTool.
-// ---------------------------------------------------------------------------
-const tools = [
-  betaZodTool({
-    name: "calculator",
-    description:
-      "Evaluate a basic arithmetic expression. Use this for any math instead " +
-      "of computing it yourself.",
-    inputSchema: z.object({
-      expression: z.string().describe("Arithmetic only, e.g. (2 + 3) * 7"),
-    }),
-    run: ({ expression }) => {
-      stdout.write(`\n  ↳ calculator(${JSON.stringify({ expression })})`);
-      if (!/^[0-9+\-*/().\s]+$/.test(expression)) {
-        return "Error: only numbers and + - * / ( ) . are allowed.";
-      }
-      try {
-        return String(Function(`"use strict"; return (${expression});`)());
-      } catch (err) {
-        return fail(err);
-      }
-    },
-  }),
-
-  betaZodTool({
-    name: "read_file",
-    description: "Read a UTF-8 text file and return its full contents.",
-    inputSchema: z.object({
-      path: z.string().describe("File path, relative to the current directory."),
-    }),
-    run: async ({ path }) => {
-      stdout.write(`\n  ↳ read_file(${JSON.stringify({ path })})`);
-      try {
-        return await readFile(path, "utf8");
-      } catch (err) {
-        return fail(err);
-      }
-    },
-  }),
-
-  betaZodTool({
-    name: "write_file",
-    description: "Write (creating or overwriting) a UTF-8 text file.",
-    inputSchema: z.object({
-      path: z.string().describe("File path, relative to the current directory."),
-      content: z.string().describe("The full text to write."),
-    }),
-    run: async ({ path, content }) => {
-      stdout.write(`\n  ↳ write_file(${JSON.stringify({ path })})`);
-      try {
-        await writeFile(path, content, "utf8");
-        return `Wrote ${content.length} characters to ${path}.`;
-      } catch (err) {
-        return fail(err);
-      }
-    },
-  }),
-];
-
-// ---------------------------------------------------------------------------
-// Conversation state
-// ---------------------------------------------------------------------------
 let messages: Anthropic.Beta.BetaMessageParam[] = [];
 
-// Flatten the structured history into a plain text transcript. We summarize from
-// this (not by replaying tool_use/tool_result blocks) so the request stays a
-// simple single user message.
 function transcript(msgs: Anthropic.Beta.BetaMessageParam[]): string {
   const lines: string[] = [];
   for (const m of msgs) {
@@ -132,8 +148,6 @@ function transcript(msgs: Anthropic.Beta.BetaMessageParam[]): string {
   return lines.join("\n");
 }
 
-// The structured-output call. Note: no tools, and output_format constrains the
-// reply to our schema. parse() validates it and hands back a typed object.
 async function summarize(): Promise<void> {
   if (messages.length === 0) {
     console.log("Nothing to summarize yet — have a conversation first.\n");
@@ -154,13 +168,11 @@ async function summarize(): Promise<void> {
       ],
       output_format: betaZodOutputFormat(SummarySchema),
     });
-
-    const s = result.parsed_output; // typed as z.infer<typeof SummarySchema> | null
+    const s = result.parsed_output;
     if (!s) {
       console.log("Could not produce a summary.\n");
       return;
     }
-
     console.log("\n── Summary ──");
     console.log(`Title:     ${s.title}`);
     console.log(`Sentiment: ${s.sentiment}`);
@@ -180,6 +192,7 @@ function printHelp(): void {
   console.log(`
 Commands:
   /help      Show this help
+  /tools     List the tools currently available (local + MCP)
   /summary   Structured summary of the conversation (typed + validated)
   /reset     Clear the conversation history
   exit|quit  Leave
@@ -199,9 +212,12 @@ while (true) {
   if (userInput === "") continue;
   if (userInput === "exit" || userInput === "quit") break;
 
-  // Slash commands are handled locally, not sent to the model.
   if (userInput === "/help") {
     printHelp();
+    continue;
+  }
+  if (userInput === "/tools") {
+    console.log(tools.map((t) => `  • ${t.name}`).join("\n") + "\n");
     continue;
   }
   if (userInput === "/reset") {
@@ -225,10 +241,7 @@ while (true) {
       messages,
       tools,
       max_iterations: MAX_STEPS,
-      // Non-streaming: this SDK version's streaming tool runner leaks a `parsed`
-      // field into the re-sent history (400 "text.parsed: Extra inputs are not
-      // permitted"). Tool calls stay visible via the `↳` logs.
-      stream: false,
+      stream: false, // streaming runner leaks a `parsed` field (see Stage 3)
     });
 
     for await (const message of runner) {
@@ -242,7 +255,7 @@ while (true) {
 
     messages = [...runner.params.messages];
   } catch (err) {
-    messages.length = historyMark; // roll the failed turn out of history
+    messages.length = historyMark;
     if (err instanceof Anthropic.APIError && err.status === 529) {
       stdout.write(
         "\n[Claude is overloaded (529) — temporary Anthropic-side issue. Try again.]\n\n",
@@ -254,4 +267,5 @@ while (true) {
 }
 
 rl.close();
+await mcp.close(); // shut down the MCP server subprocess cleanly
 console.log("Bye!");

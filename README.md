@@ -17,22 +17,23 @@ A CLI personal-assistant agent, built stage by stage to learn AI agents, tool us
    # then edit .env and paste your key from https://console.anthropic.com/settings/keys
    ```
 
-## Run (Stage 4)
+## Run (Stage 5)
 
 ```bash
 npm run dev
 ```
 
-Chat with the agent — replies stream in and the conversation is remembered.
-The agent now has tools: it can do math, read files, and write files. Try:
+On startup the app launches the official **MCP filesystem server** as a
+subprocess and adopts its ~14 file tools (read, write, list, search, …). It also
+has a local `calculator`. Try:
 
-- `What is (2 + 3) * 7?` → uses the `calculator` tool
-- `Write a haiku about the sea to poem.txt` → uses `write_file`
-- `Read poem.txt and translate it to French` → uses `read_file`
+- `What is (2 + 3) * 7?` → local `calculator` tool
+- `List the files in this directory` → MCP `list_directory` tool
+- `Write a haiku about the sea to poem.txt, then read it back` → MCP `write_file` + `read_file`
 
-Type `/help` for commands. `/summary` returns a typed, schema-validated summary
-of the conversation; `/reset` clears history; `exit` or `quit` leaves. Switch
-models with `MODEL=claude-haiku-4-5 npm run dev`.
+Commands: `/help`, `/tools` (list local + MCP tools), `/summary` (typed,
+schema-validated summary), `/reset`, `exit`/`quit`. Switch models with
+`MODEL=claude-haiku-4-5 npm run dev`.
 
 ## Roadmap
 
@@ -41,7 +42,7 @@ models with `MODEL=claude-haiku-4-5 npm run dev`.
 - [x] **Stage 2 — First tools:** `read_file`, `write_file`, `calculator` (manual tool-use loop).
 - [x] **Stage 3 — The agentic loop:** same tools, driven by the SDK tool runner (`betaZodTool` + `toolRunner`).
 - [x] **Stage 4 — Structured output & polish:** `/summary` returns typed, schema-validated JSON; `/help` and `/reset` commands.
-- [ ] **Stage 5 — Connect to MCP:** plug in an existing MCP server.
+- [x] **Stage 5 — Connect to MCP:** adopt file tools from the official MCP filesystem server (client/server split).
 - [ ] **Stage 6 — Build your own MCP server:** expose your own tools over MCP.
 
 Model: `claude-sonnet-5`.
