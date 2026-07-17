@@ -9,11 +9,13 @@ import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-// Stage 7 — Persistent memory across sessions
-// The conversation now survives restarts: we load the saved message history on
-// startup and save it after every turn (to session.json). Combined with the
-// notes MCP server, the agent has both short-term memory (this conversation)
-// and long-term memory (notes it chooses to save).
+// Stage 8 — A coordinator agent
+// The main agent can now delegate to a specialized "researcher" sub-agent via
+// the ask_researcher tool. When called, we run a SEPARATE Claude conversation
+// with its own system prompt and its own tools (files + notes), and return its
+// findings as the tool result. To the main agent it looks like one tool call;
+// under the hood it's a whole second agent. (Conversation still persists across
+// restarts, per Stage 7.)
 //   npm run dev
 
 const client = new Anthropic({
@@ -23,7 +25,9 @@ const client = new Anthropic({
 const SYSTEM_PROMPT =
   "You are a concise, friendly CLI assistant. You can do math and work with " +
   "files (read, write, list, search) via your tools. Use a tool whenever it " +
-  "helps; do not guess at file contents or arithmetic you could compute.";
+  "helps; do not guess at file contents or arithmetic you could compute. " +
+  "For questions that need digging through the project's files or the saved " +
+  "notes, delegate to the researcher via the ask_researcher tool.";
 
 const MODEL = process.env.MODEL ?? "claude-sonnet-5";
 const MAX_STEPS = 10;
@@ -137,8 +141,55 @@ const notes = await adoptMcpServer("npx", ["tsx", "src/server.ts"]);
 // Clients to shut down on exit.
 const mcpClients = [filesystem.mcp, notes.mcp];
 
-// One local tool + tools from both servers, all treated identically.
-const tools = [calculator, ...filesystem.tools, ...notes.tools];
+// ---------------------------------------------------------------------------
+// A researcher SUB-AGENT, exposed to the main agent as a single tool.
+// ---------------------------------------------------------------------------
+const RESEARCHER_SYSTEM =
+  "You are a focused research assistant. Use your file and note tools to dig " +
+  "into the user's project and notes, then answer the question concisely with " +
+  "specific findings. Reference file names or note ids where relevant.";
+
+// The researcher gets the file + note tools — but NOT ask_researcher itself, so
+// it can't recursively delegate to another researcher forever.
+const researcherTools = [...filesystem.tools, ...notes.tools];
+
+const askResearcher = betaZodTool({
+  name: "ask_researcher",
+  description:
+    "Delegate a question to a researcher sub-agent that can read files and " +
+    "search notes. Use this for questions that require digging through the " +
+    "project's files or the saved notes. Returns the researcher's findings.",
+  inputSchema: z.object({
+    question: z.string().describe("The research question for the sub-agent."),
+  }),
+  run: async ({ question }) => {
+    stdout.write(`\n  ↳ ask_researcher(${JSON.stringify({ question })})`);
+    try {
+      // A whole separate agent conversation: its own system prompt, its own
+      // tools, its own tool-use loop. Awaiting the runner runs it to completion
+      // and returns the sub-agent's final message.
+      const finalMessage = await client.beta.messages.toolRunner({
+        model: MODEL,
+        max_tokens: 2048,
+        system: RESEARCHER_SYSTEM,
+        messages: [{ role: "user", content: question }],
+        tools: researcherTools,
+        max_iterations: MAX_STEPS,
+        stream: false,
+      });
+      let findings = "";
+      for (const block of finalMessage.content) {
+        if (block.type === "text") findings += block.text;
+      }
+      return findings.trim() || "(the researcher returned no findings)";
+    } catch (err) {
+      return fail(err);
+    }
+  },
+});
+
+// Main agent tools: local calculator + both MCP servers + the researcher.
+const tools = [calculator, ...filesystem.tools, ...notes.tools, askResearcher];
 
 console.log(
   "Connected to 2 MCP servers (filesystem + notes). Tools available:\n  " +
