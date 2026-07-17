@@ -1,6 +1,7 @@
 import "dotenv/config";
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import { readFile, writeFile } from "node:fs/promises";
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool, betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { betaTool } from "@anthropic-ai/sdk/helpers/beta/json-schema";
@@ -8,12 +9,11 @@ import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-// Stage 5 — Connect to an existing MCP server
-// Until now WE wrote every tool. MCP (Model Context Protocol) lets tools live in
-// a separate server process that any MCP-aware app can use. Here we launch the
-// official filesystem server as a subprocess, ask it what tools it offers, and
-// wrap each so our tool runner (and thus Claude) can call it. The file tools we
-// hand-wrote in Stage 2 are gone — the MCP server provides better ones for free.
+// Stage 7 — Persistent memory across sessions
+// The conversation now survives restarts: we load the saved message history on
+// startup and save it after every turn (to session.json). Combined with the
+// notes MCP server, the agent has both short-term memory (this conversation)
+// and long-term memory (notes it chooses to save).
 //   npm run dev
 
 const client = new Anthropic({
@@ -28,8 +28,29 @@ const SYSTEM_PROMPT =
 const MODEL = process.env.MODEL ?? "claude-sonnet-5";
 const MAX_STEPS = 10;
 
+// Where the conversation is persisted between runs.
+const SESSION_FILE = "session.json";
+
 function fail(err: unknown): string {
   return `Error: ${err instanceof Error ? err.message : String(err)}`;
+}
+
+// Load the saved conversation (empty if there isn't one yet). The saved history
+// includes tool_use / tool_result blocks, so a resumed session is complete.
+async function loadSession(): Promise<Anthropic.Beta.BetaMessageParam[]> {
+  try {
+    return JSON.parse(
+      await readFile(SESSION_FILE, "utf8"),
+    ) as Anthropic.Beta.BetaMessageParam[];
+  } catch {
+    return []; // no file yet, or unreadable → start fresh
+  }
+}
+
+async function saveSession(
+  msgs: Anthropic.Beta.BetaMessageParam[],
+): Promise<void> {
+  await writeFile(SESSION_FILE, JSON.stringify(msgs, null, 2), "utf8");
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +160,7 @@ const SummarySchema = z.object({
     .describe("Overall tone of the conversation"),
 });
 
-let messages: Anthropic.Beta.BetaMessageParam[] = [];
+let messages: Anthropic.Beta.BetaMessageParam[] = await loadSession();
 
 function transcript(msgs: Anthropic.Beta.BetaMessageParam[]): string {
   const lines: string[] = [];
@@ -216,6 +237,11 @@ Anything else is sent to the assistant, which can use tools.
 // ---------------------------------------------------------------------------
 const rl = readline.createInterface({ input: stdin, output: stdout });
 
+if (messages.length > 0) {
+  console.log(
+    `Resumed your previous session (${messages.length} messages). "/reset" starts fresh.`,
+  );
+}
 console.log('Chat started. Type "/help" for commands.\n');
 
 while (true) {
@@ -233,6 +259,7 @@ while (true) {
   }
   if (userInput === "/reset") {
     messages = [];
+    await saveSession(messages); // clear the persisted history too
     console.log("Conversation cleared.\n");
     continue;
   }
@@ -265,6 +292,7 @@ while (true) {
     stdout.write("\n");
 
     messages = [...runner.params.messages];
+    await saveSession(messages); // persist so the conversation survives a restart
   } catch (err) {
     messages.length = historyMark;
     if (err instanceof Anthropic.APIError && err.status === 529) {

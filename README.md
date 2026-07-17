@@ -17,7 +17,7 @@ A CLI personal-assistant agent, built stage by stage to learn AI agents, tool us
    # then edit .env and paste your key from https://console.anthropic.com/settings/keys
    ```
 
-## Run (Stage 6)
+## Run (Stage 7)
 
 ```bash
 npm run dev
@@ -26,11 +26,13 @@ npm run dev
 On startup the app launches **two MCP servers** as subprocesses and adopts their
 tools: the third-party **filesystem** server (~14 file tools) and our own
 **notes** server ([src/server.ts](src/server.ts): `add_note`, `list_notes`,
-`search_notes`). It also has a local `calculator`. Try:
+`search_notes`). It also has a local `calculator`. The conversation is saved to
+`session.json` and **resumed automatically on the next run**. Try:
 
 - `What is (2 + 3) * 7?` → local `calculator`
 - `List the files here` → filesystem MCP server
 - `Remember that I prefer TypeScript` then `What are my notes?` → notes MCP server
+- Tell it your name, quit, re-run `npm run dev`, ask `What's my name?` → it remembers
 
 You can also run the notes server on its own (it waits for MCP messages on stdin):
 
@@ -50,5 +52,8 @@ with `MODEL=claude-haiku-4-5 npm run dev`.
 - [x] **Stage 4 — Structured output & polish:** `/summary` returns typed, schema-validated JSON; `/help` and `/reset` commands.
 - [x] **Stage 5 — Connect to MCP:** adopt file tools from the official MCP filesystem server (client/server split).
 - [x] **Stage 6 — Build your own MCP server:** a notes server (`src/server.ts`) the agent uses alongside the filesystem server.
+- [x] **Stage 7 — Persistent memory across sessions:** the conversation is saved to `session.json` and resumed on restart.
+- [ ] **Stage 8 — Coordinator agent:** a second agent the main agent can delegate to.
+- [ ] **Stage 9 — Package the notes server:** make it installable so others can `npx` it.
 
 Model: `claude-sonnet-5`.
