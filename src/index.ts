@@ -9,13 +9,13 @@ import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-// Stage 8 — A coordinator agent
-// The main agent can now delegate to a specialized "researcher" sub-agent via
-// the ask_researcher tool. When called, we run a SEPARATE Claude conversation
-// with its own system prompt and its own tools (files + notes), and return its
-// findings as the tool result. To the main agent it looks like one tool call;
-// under the hood it's a whole second agent. (Conversation still persists across
-// restarts, per Stage 7.)
+// Stage 9 — Consume a published MCP server
+// The notes server is no longer a local file — it's `sample-notes-mcp-server`,
+// published to npm and installed as a dependency. We launch it exactly like the
+// third-party filesystem server (npx + a path arg), which is the whole point of
+// MCP: our own server is now interchangeable infrastructure anyone can install.
+// (Everything from Stages 1–8 still applies: memory, tools, /summary, session
+// persistence, and the researcher sub-agent.)
 //   npm run dev
 
 const client = new Anthropic({
@@ -134,9 +134,14 @@ const filesystem = await adoptMcpServer("npx", [
   process.cwd(),
 ]);
 
-// Server 2: OUR OWN notes server, run with tsx. Same protocol, same wiring —
-// the client can't tell it's homegrown.
-const notes = await adoptMcpServer("npx", ["tsx", "src/server.ts"]);
+// Server 2: our notes server — now the PUBLISHED sample-notes-mcp-server package
+// (installed from npm), launched via npx with the notes-file path. Same helper,
+// same protocol; it's just another installable MCP server now.
+const notes = await adoptMcpServer("npx", [
+  "-y",
+  "sample-notes-mcp-server",
+  "notes.json",
+]);
 
 // Clients to shut down on exit.
 const mcpClients = [filesystem.mcp, notes.mcp];
