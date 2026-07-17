@@ -3,14 +3,14 @@ import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { readFile, writeFile } from "node:fs/promises";
 import Anthropic from "@anthropic-ai/sdk";
-import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
+import { betaZodTool, betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
 
-// Stage 3 — The agentic loop, driven by the SDK
-// Same behavior as Stage 2, but the hand-written tool-use loop is GONE. Each
-// tool is now defined in one place (name + description + schema + run), and
-// client.beta.messages.toolRunner() drives the whole request → run tool →
-// feed-back cycle for us.
+// Stage 4 — Structured output & polish
+// Free-form chat is great for humans, but sometimes YOUR CODE needs data it can
+// rely on: fields with known names and types. This stage adds a /summary command
+// that returns a typed, schema-validated object (not prose), plus a few polish
+// commands (/help, /reset).
 //   npm run dev
 
 const client = new Anthropic({
@@ -23,21 +23,31 @@ const SYSTEM_PROMPT =
   "guess at file contents or arithmetic you could compute.";
 
 const MODEL = process.env.MODEL ?? "claude-sonnet-5";
-
-// Cap the runner's internal loop so a misbehaving turn can't run away.
 const MAX_STEPS = 10;
 
-// Small helper so every tool reports errors as text (which Claude can read and
-// recover from) instead of throwing (which would abort the whole turn).
+// Report tool errors as text (Claude can read and recover) instead of throwing.
 function fail(err: unknown): string {
   return `Error: ${err instanceof Error ? err.message : String(err)}`;
 }
 
 // ---------------------------------------------------------------------------
-// Tools — each is now defined ONCE. betaZodTool bundles the name, description,
-// input schema (a Zod object, which also gives us typed `args`), and the run
-// function together. Compare this to Stage 2, where the schema lived in a
-// `tools` array and the implementation lived in a separate `runTool` switch.
+// Structured output — the shape we want back from /summary. This Zod schema is
+// BOTH the runtime validator AND the TypeScript type: parse() returns an object
+// guaranteed to match it, and `summary.sentiment` is typed as the enum.
+// ---------------------------------------------------------------------------
+const SummarySchema = z.object({
+  title: z.string().describe("A short title for the conversation"),
+  keyPoints: z.array(z.string()).describe("The main points discussed"),
+  actionItems: z
+    .array(z.string())
+    .describe("Any tasks or follow-ups; empty array if none"),
+  sentiment: z
+    .enum(["positive", "neutral", "negative"])
+    .describe("Overall tone of the conversation"),
+});
+
+// ---------------------------------------------------------------------------
+// Tools (unchanged from Stage 3) — defined once each with betaZodTool.
 // ---------------------------------------------------------------------------
 const tools = [
   betaZodTool({
@@ -50,7 +60,6 @@ const tools = [
     }),
     run: ({ expression }) => {
       stdout.write(`\n  ↳ calculator(${JSON.stringify({ expression })})`);
-      // Only allow arithmetic characters — never run arbitrary model code.
       if (!/^[0-9+\-*/().\s]+$/.test(expression)) {
         return "Error: only numbers and + - * / ( ) . are allowed.";
       }
@@ -98,19 +107,112 @@ const tools = [
 ];
 
 // ---------------------------------------------------------------------------
-// The chat loop. Notice what's NO LONGER here: no checking stop_reason, no
-// executing tools, no assembling tool_result blocks, no inner while-loop. The
-// runner does all of that. We just feed it the history and consume the output.
+// Conversation state
 // ---------------------------------------------------------------------------
 let messages: Anthropic.Beta.BetaMessageParam[] = [];
+
+// Flatten the structured history into a plain text transcript. We summarize from
+// this (not by replaying tool_use/tool_result blocks) so the request stays a
+// simple single user message.
+function transcript(msgs: Anthropic.Beta.BetaMessageParam[]): string {
+  const lines: string[] = [];
+  for (const m of msgs) {
+    let text = "";
+    if (typeof m.content === "string") {
+      text = m.content;
+    } else {
+      for (const block of m.content) {
+        if (block.type === "text") text += block.text + " ";
+        else if (block.type === "tool_use") text += `[called ${block.name}] `;
+      }
+    }
+    text = text.trim();
+    if (text) lines.push(`${m.role}: ${text}`);
+  }
+  return lines.join("\n");
+}
+
+// The structured-output call. Note: no tools, and output_format constrains the
+// reply to our schema. parse() validates it and hands back a typed object.
+async function summarize(): Promise<void> {
+  if (messages.length === 0) {
+    console.log("Nothing to summarize yet — have a conversation first.\n");
+    return;
+  }
+  try {
+    const result = await client.beta.messages.parse({
+      model: MODEL,
+      max_tokens: 1024,
+      system: "You produce accurate, concise structured summaries.",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Summarize the following conversation as structured data.\n\n" +
+            transcript(messages),
+        },
+      ],
+      output_format: betaZodOutputFormat(SummarySchema),
+    });
+
+    const s = result.parsed_output; // typed as z.infer<typeof SummarySchema> | null
+    if (!s) {
+      console.log("Could not produce a summary.\n");
+      return;
+    }
+
+    console.log("\n── Summary ──");
+    console.log(`Title:     ${s.title}`);
+    console.log(`Sentiment: ${s.sentiment}`);
+    console.log("Key points:");
+    for (const point of s.keyPoints) console.log(`  • ${point}`);
+    if (s.actionItems.length > 0) {
+      console.log("Action items:");
+      for (const item of s.actionItems) console.log(`  • ${item}`);
+    }
+    console.log();
+  } catch (err) {
+    console.log(`[Summary failed: ${fail(err)} — try again.]\n`);
+  }
+}
+
+function printHelp(): void {
+  console.log(`
+Commands:
+  /help      Show this help
+  /summary   Structured summary of the conversation (typed + validated)
+  /reset     Clear the conversation history
+  exit|quit  Leave
+Anything else is sent to the assistant, which can use tools.
+`);
+}
+
+// ---------------------------------------------------------------------------
+// The chat loop
+// ---------------------------------------------------------------------------
 const rl = readline.createInterface({ input: stdin, output: stdout });
 
-console.log('Chat started (tool runner). Type "exit" or "quit" to leave.\n');
+console.log('Chat started. Type "/help" for commands.\n');
 
 while (true) {
   const userInput = (await rl.question("You: ")).trim();
   if (userInput === "") continue;
   if (userInput === "exit" || userInput === "quit") break;
+
+  // Slash commands are handled locally, not sent to the model.
+  if (userInput === "/help") {
+    printHelp();
+    continue;
+  }
+  if (userInput === "/reset") {
+    messages = [];
+    console.log("Conversation cleared.\n");
+    continue;
+  }
+  if (userInput === "/summary") {
+    await summarize();
+    continue;
+  }
 
   const historyMark = messages.length;
   messages.push({ role: "user", content: userInput });
@@ -123,16 +225,12 @@ while (true) {
       messages,
       tools,
       max_iterations: MAX_STEPS,
-      // Non-streaming. In this SDK version the *streaming* tool runner leaks a
-      // `parsed` field from finalMessage() back into the re-sent history, which
-      // the API rejects (400 "text.parsed: Extra inputs are not permitted").
-      // The non-streaming path returns clean message params. Tool calls stay
-      // visible via the `↳` logs inside each tool's run function.
+      // Non-streaming: this SDK version's streaming tool runner leaks a `parsed`
+      // field into the re-sent history (400 "text.parsed: Extra inputs are not
+      // permitted"). Tool calls stay visible via the `↳` logs.
       stream: false,
     });
 
-    // Each iteration is one assistant turn (a BetaMessage). The runner executes
-    // any requested tools between turns via their run functions above.
     for await (const message of runner) {
       let text = "";
       for (const block of message.content) {
@@ -142,8 +240,6 @@ while (true) {
     }
     stdout.write("\n");
 
-    // Sync our history with everything the runner accumulated this turn:
-    // assistant text, the tool_use blocks, and the tool_result blocks.
     messages = [...runner.params.messages];
   } catch (err) {
     messages.length = historyMark; // roll the failed turn out of history
