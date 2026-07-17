@@ -17,7 +17,7 @@ A CLI personal-assistant agent, built stage by stage to learn AI agents, tool us
    # then edit .env and paste your key from https://console.anthropic.com/settings/keys
    ```
 
-## Run (Stage 2)
+## Run (Stage 3)
 
 ```bash
 npm run dev
@@ -38,7 +38,7 @@ Type `exit` or `quit` (or Ctrl+C) to leave. Switch models with
 - [x] **Stage 0 — Hello Claude:** one-shot CLI, a single Messages API call.
 - [x] **Stage 1 — Chat loop:** multi-turn conversation with history + streaming.
 - [x] **Stage 2 — First tools:** `read_file`, `write_file`, `calculator` (manual tool-use loop).
-- [ ] **Stage 3 — The agentic loop:** chain tool calls automatically (SDK tool runner).
+- [x] **Stage 3 — The agentic loop:** same tools, driven by the SDK tool runner (`betaZodTool` + `toolRunner`).
 - [ ] **Stage 4 — Structured output & polish:** typed JSON, error handling.
 - [ ] **Stage 5 — Connect to MCP:** plug in an existing MCP server.
 - [ ] **Stage 6 — Build your own MCP server:** expose your own tools over MCP.
